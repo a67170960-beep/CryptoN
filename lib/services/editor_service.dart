@@ -1,4 +1,7 @@
+import 'dart:io';
 import 'package:flutter/foundation.dart';
+import 'package:uuid/uuid.dart';
+import 'package:video_player/video_player.dart';
 
 enum ToolTab {
   media,
@@ -18,14 +21,14 @@ enum ToolTab {
 class TimelineClip {
   final String id;
   String name;
-  double start; // seconds on timeline
+  double start;
   double duration;
-  String type; // video / audio / text / sticker / effect
+  String type;
   String? path;
   double volume;
   double speed;
   bool muted;
-  Map<String, dynamic> properties;
+  VideoPlayerController? controller;
 
   TimelineClip({
     required this.id,
@@ -37,11 +40,13 @@ class TimelineClip {
     this.volume = 1.0,
     this.speed = 1.0,
     this.muted = false,
-    Map<String, dynamic>? properties,
-  }) : properties = properties ?? {};
+    this.controller,
+  });
 }
 
 class EditorService extends ChangeNotifier {
+  final _uuid = const Uuid();
+
   ToolTab _currentTab = ToolTab.media;
   double _playhead = 0.0;
   double _timelineScale = 1.0;
@@ -51,8 +56,10 @@ class EditorService extends ChangeNotifier {
   String _projectName = 'Untitled';
   final List<TimelineClip> _clips = [];
   String? _selectedClipId;
+  VideoPlayerController? _previewController;
+  bool _isLoadingMedia = false;
+  String? _errorMessage;
 
-  // Getters
   ToolTab get currentTab => _currentTab;
   double get playhead => _playhead;
   double get timelineScale => _timelineScale;
@@ -62,6 +69,10 @@ class EditorService extends ChangeNotifier {
   String get projectName => _projectName;
   List<TimelineClip> get clips => List.unmodifiable(_clips);
   String? get selectedClipId => _selectedClipId;
+  VideoPlayerController? get previewController => _previewController;
+  bool get isLoadingMedia => _isLoadingMedia;
+  String? get errorMessage => _errorMessage;
+  bool get hasVideo => _previewController != null && _previewController!.value.isInitialized;
 
   TimelineClip? get selectedClip {
     if (_selectedClipId == null) return null;
@@ -73,9 +84,13 @@ class EditorService extends ChangeNotifier {
   }
 
   double get totalDuration {
-    if (_clips.isEmpty) return 30.0;
-    return _clips.map((c) => c.start + c.duration).reduce((a, b) => a > b ? a : b);
+    if (_clips.isEmpty) return 10.0;
+    return _clips.map((c) => c.start + c.duration).reduce((a, b) => a > b ? a : b).clamp(1.0, 9999.0);
   }
+
+  List<TimelineClip> get videoClips => _clips.where((c) => c.type == 'video').toList();
+  List<TimelineClip> get audioClips => _clips.where((c) => c.type == 'audio').toList();
+  List<TimelineClip> get textClips => _clips.where((c) => c.type == 'text').toList();
 
   void setTab(ToolTab tab) {
     _currentTab = tab;
@@ -84,6 +99,9 @@ class EditorService extends ChangeNotifier {
 
   void setPlayhead(double value) {
     _playhead = value.clamp(0.0, totalDuration);
+    if (_previewController != null && _previewController!.value.isInitialized) {
+      _previewController!.seekTo(Duration(milliseconds: (_playhead * 1000).round()));
+    }
     notifyListeners();
   }
 
@@ -92,14 +110,42 @@ class EditorService extends ChangeNotifier {
     notifyListeners();
   }
 
-  void togglePlay() {
-    _isPlaying = !_isPlaying;
+  Future<void> togglePlay() async {
+    if (_previewController == null || !_previewController!.value.isInitialized) {
+      _isPlaying = false;
+      notifyListeners();
+      return;
+    }
+    if (_isPlaying) {
+      await _previewController!.pause();
+      _isPlaying = false;
+    } else {
+      await _previewController!.play();
+      _isPlaying = true;
+      _listenPosition();
+    }
     notifyListeners();
+  }
+
+  void _listenPosition() {
+    _previewController?.addListener(() {
+      if (_previewController == null) return;
+      if (_previewController!.value.isPlaying) {
+        _playhead = _previewController!.value.position.inMilliseconds / 1000.0;
+        notifyListeners();
+      }
+      if (_previewController!.value.position >= _previewController!.value.duration) {
+        _isPlaying = false;
+        notifyListeners();
+      }
+    });
   }
 
   void stop() {
     _isPlaying = false;
     _playhead = 0;
+    _previewController?.pause();
+    _previewController?.seekTo(Duration.zero);
     notifyListeners();
   }
 
@@ -108,24 +154,102 @@ class EditorService extends ChangeNotifier {
     notifyListeners();
   }
 
-  void addClip(TimelineClip clip) {
+  Future<void> importVideo(String filePath, String fileName) async {
+    _isLoadingMedia = true;
+    _errorMessage = null;
+    notifyListeners();
+
+    try {
+      await _previewController?.dispose();
+      _previewController = null;
+
+      final controller = VideoPlayerController.file(File(filePath));
+      await controller.initialize();
+
+      final durationSec = controller.value.duration.inMilliseconds / 1000.0;
+
+      double startAt = 0;
+      if (videoClips.isNotEmpty) {
+        startAt = videoClips.map((c) => c.start + c.duration).reduce((a, b) => a > b ? a : b);
+      }
+
+      final clip = TimelineClip(
+        id: _uuid.v4(),
+        name: fileName.length > 20 ? '${fileName.substring(0, 18)}…' : fileName,
+        start: startAt,
+        duration: durationSec,
+        type: 'video',
+        path: filePath,
+        controller: controller,
+      );
+
+      _clips.add(clip);
+      _selectedClipId = clip.id;
+      _previewController = controller;
+      _playhead = startAt;
+      await controller.seekTo(Duration.zero);
+
+      _isLoadingMedia = false;
+      notifyListeners();
+    } catch (e) {
+      _isLoadingMedia = false;
+      _errorMessage = 'Не удалось загрузить видео';
+      notifyListeners();
+    }
+  }
+
+  void addTextClip(String text) {
+    final clip = TimelineClip(
+      id: _uuid.v4(),
+      name: text.isEmpty ? 'Text' : (text.length > 12 ? '${text.substring(0, 10)}…' : text),
+      start: _playhead,
+      duration: 3.0,
+      type: 'text',
+    );
     _clips.add(clip);
     _selectedClipId = clip.id;
     notifyListeners();
   }
 
-  void removeClip(String id) {
+  void removeSelectedClip() {
+    if (_selectedClipId == null) return;
+    final id = _selectedClipId!;
+    TimelineClip? clip;
+    for (final c in _clips) {
+      if (c.id == id) {
+        clip = c;
+        break;
+      }
+    }
+    if (clip == null) return;
+    clip.controller?.dispose();
     _clips.removeWhere((c) => c.id == id);
-    if (_selectedClipId == id) _selectedClipId = null;
+    if (_previewController == clip.controller) {
+      _previewController = null;
+      _isPlaying = false;
+    }
+    _selectedClipId = null;
     notifyListeners();
   }
 
-  void updateClip(String id, {double? start, double? duration, double? volume, double? speed}) {
-    final clip = _clips.firstWhere((c) => c.id == id);
-    if (start != null) clip.start = start;
-    if (duration != null) clip.duration = duration;
-    if (volume != null) clip.volume = volume;
-    if (speed != null) clip.speed = speed;
+  void splitSelectedClip() {
+    final clip = selectedClip;
+    if (clip == null || clip.type != 'video') return;
+    if (_playhead <= clip.start || _playhead >= clip.start + clip.duration) return;
+
+    final leftDuration = _playhead - clip.start;
+    final rightDuration = clip.duration - leftDuration;
+    clip.duration = leftDuration;
+
+    final right = TimelineClip(
+      id: _uuid.v4(),
+      name: '${clip.name} (2)',
+      start: _playhead,
+      duration: rightDuration,
+      type: 'video',
+      path: clip.path,
+    );
+    _clips.add(right);
     notifyListeners();
   }
 
@@ -135,14 +259,18 @@ class EditorService extends ChangeNotifier {
   }
 
   Future<void> exportProject() async {
+    if (_clips.isEmpty) {
+      _errorMessage = 'Нет клипов для экспорта';
+      notifyListeners();
+      return;
+    }
     _isExporting = true;
     _exportProgress = 0;
     notifyListeners();
 
-    // Simulate export progress
-    for (int i = 1; i <= 20; i++) {
-      await Future.delayed(const Duration(milliseconds: 120));
-      _exportProgress = i / 20;
+    for (int i = 1; i <= 12; i++) {
+      await Future.delayed(const Duration(milliseconds: 80));
+      _exportProgress = i / 12.0;
       notifyListeners();
     }
 
@@ -151,40 +279,19 @@ class EditorService extends ChangeNotifier {
     notifyListeners();
   }
 
-  // Demo clips for first open
-  void loadDemoTimeline() {
-    if (_clips.isNotEmpty) return;
-    _clips.addAll([
-      TimelineClip(
-        id: 'c1',
-        name: 'Clip 1',
-        start: 0,
-        duration: 5.2,
-        type: 'video',
-      ),
-      TimelineClip(
-        id: 'c2',
-        name: 'Clip 2',
-        start: 5.2,
-        duration: 4.8,
-        type: 'video',
-      ),
-      TimelineClip(
-        id: 'a1',
-        name: 'Music',
-        start: 0,
-        duration: 15,
-        type: 'audio',
-        volume: 0.7,
-      ),
-      TimelineClip(
-        id: 't1',
-        name: 'Title',
-        start: 1.0,
-        duration: 3.0,
-        type: 'text',
-      ),
-    ]);
+  void clearError() {
+    _errorMessage = null;
     notifyListeners();
+  }
+
+  void loadDemoTimeline() {}
+
+  @override
+  void dispose() {
+    _previewController?.dispose();
+    for (final c in _clips) {
+      c.controller?.dispose();
+    }
+    super.dispose();
   }
 }

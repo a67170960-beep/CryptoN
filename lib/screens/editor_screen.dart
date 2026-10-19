@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:video_player/video_player.dart';
 import '../theme/app_theme.dart';
 import '../theme/liquid_glass.dart';
 import '../services/editor_service.dart';
@@ -23,10 +26,77 @@ class _EditorScreenState extends State<EditorScreen> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      final editor = context.read<EditorService>();
-      editor.setProjectName(widget.projectName);
-      editor.loadDemoTimeline();
+      context.read<EditorService>().setProjectName(widget.projectName);
     });
+  }
+
+  Future<void> _importVideo() async {
+    final status = await Permission.videos.request();
+    final storage = await Permission.storage.request();
+    if (!status.isGranted && !storage.isGranted) {
+      // try photos permission on newer android
+      await Permission.photos.request();
+    }
+
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.video,
+      allowMultiple: false,
+    );
+
+    if (result != null && result.files.single.path != null) {
+      final path = result.files.single.path!;
+      final name = result.files.single.name;
+      await context.read<EditorService>().importVideo(path, name);
+    }
+  }
+
+  Future<void> _importAudio() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.audio,
+      allowMultiple: false,
+    );
+    if (result != null && result.files.single.path != null) {
+      // For now treat as video import path for simplicity - just add as audio clip placeholder
+      final path = result.files.single.path!;
+      final name = result.files.single.name;
+      final editor = context.read<EditorService>();
+      editor.addTextClip('Audio: $name'); // temporary until full audio support
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Аудио добавлено: $name')),
+      );
+    }
+  }
+
+  void _addText() {
+    final controller = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppTheme.surface,
+        title: const Text('Добавить текст', style: TextStyle(color: AppTheme.textPrimary)),
+        content: TextField(
+          controller: controller,
+          style: const TextStyle(color: AppTheme.textPrimary),
+          decoration: const InputDecoration(
+            hintText: 'Введите текст',
+            hintStyle: TextStyle(color: AppTheme.textSecondary),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Отмена'),
+          ),
+          TextButton(
+            onPressed: () {
+              context.read<EditorService>().addTextClip(controller.text);
+              Navigator.pop(ctx);
+            },
+            child: const Text('Добавить', style: TextStyle(color: AppTheme.accent)),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -34,40 +104,45 @@ class _EditorScreenState extends State<EditorScreen> {
     return Scaffold(
       backgroundColor: AppTheme.background,
       body: SafeArea(
-        child: Column(
-          children: [
-            // Top bar
-            _TopBar(projectName: widget.projectName),
-
-            // Preview area
-            Expanded(
-              flex: 5,
-              child: _PreviewArea(),
-            ),
-
-            // Timeline
-            Expanded(
-              flex: 3,
-              child: _TimelineArea(),
-            ),
-
-            // Tools
-            _ToolsBar(),
-          ],
+        child: Consumer<EditorService>(
+          builder: (context, editor, _) {
+            return Column(
+              children: [
+                _buildTopBar(editor),
+                if (editor.errorMessage != null)
+                  Container(
+                    width: double.infinity,
+                    color: AppTheme.danger.withOpacity(0.2),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            editor.errorMessage!,
+                            style: const TextStyle(color: Colors.white70, fontSize: 12),
+                          ),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.close, size: 16, color: Colors.white70),
+                          onPressed: editor.clearError,
+                        ),
+                      ],
+                    ),
+                  ),
+                Expanded(flex: 5, child: _buildPreview(editor)),
+                Expanded(flex: 3, child: _buildTimeline(editor)),
+                _buildTools(editor),
+              ],
+            );
+          },
         ),
       ),
     );
   }
-}
 
-class _TopBar extends StatelessWidget {
-  final String projectName;
-  const _TopBar({required this.projectName});
-
-  @override
-  Widget build(BuildContext context) {
+  Widget _buildTopBar(EditorService editor) {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
       child: Row(
         children: [
           IconButton(
@@ -77,116 +152,128 @@ class _TopBar extends StatelessWidget {
           ),
           Expanded(
             child: Text(
-              projectName,
+              editor.projectName,
               style: const TextStyle(
                 color: AppTheme.textPrimary,
                 fontWeight: FontWeight.w600,
-                fontSize: 16,
+                fontSize: 15,
               ),
               overflow: TextOverflow.ellipsis,
             ),
           ),
-          Consumer<EditorService>(
-            builder: (context, editor, _) {
-              if (editor.isExporting) {
-                return Padding(
-                  padding: const EdgeInsets.only(right: 8),
-                  child: SizedBox(
-                    width: 24,
-                    height: 24,
-                    child: CircularProgressIndicator(
-                      value: editor.exportProgress,
-                      strokeWidth: 2.5,
-                      color: AppTheme.accent,
-                    ),
-                  ),
-                );
-              }
-              return const SizedBox.shrink();
-            },
-          ),
-          TextButton(
-            onPressed: () {
-              context.read<EditorService>().exportProject().then((_) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Export completed')),
-                );
-              });
-            },
-            child: const Text(
-              'Export',
-              style: TextStyle(
-                color: AppTheme.accent,
-                fontWeight: FontWeight.w600,
+          if (editor.selectedClipId != null) ...[
+            IconButton(
+              icon: const Icon(Icons.content_cut_rounded, size: 20),
+              color: AppTheme.textSecondary,
+              tooltip: 'Split',
+              onPressed: editor.splitSelectedClip,
+            ),
+            IconButton(
+              icon: const Icon(Icons.delete_outline_rounded, size: 20),
+              color: AppTheme.danger,
+              tooltip: 'Delete',
+              onPressed: editor.removeSelectedClip,
+            ),
+          ],
+          if (editor.isExporting)
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: SizedBox(
+                width: 22,
+                height: 22,
+                child: CircularProgressIndicator(
+                  value: editor.exportProgress,
+                  strokeWidth: 2.5,
+                  color: AppTheme.accent,
+                ),
+              ),
+            )
+          else
+            TextButton(
+              onPressed: () async {
+                await editor.exportProject();
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Export completed (demo)')),
+                  );
+                }
+              },
+              child: const Text(
+                'Export',
+                style: TextStyle(color: AppTheme.accent, fontWeight: FontWeight.w600),
               ),
             ),
-          ),
         ],
       ),
     );
   }
-}
 
-class _PreviewArea extends StatelessWidget {
-  @override
-  Widget build(BuildContext context) {
+  Widget _buildPreview(EditorService editor) {
     return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
       child: LiquidGlass(
-        borderRadius: 16,
-        opacity: 0.07,
+        borderRadius: 14,
+        opacity: 0.06,
         padding: EdgeInsets.zero,
         child: Container(
           width: double.infinity,
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(16),
-            color: Colors.black.withOpacity(0.5),
-          ),
+          color: Colors.black,
           child: Stack(
             alignment: Alignment.center,
             children: [
-              const Icon(
-                Icons.play_circle_outline_rounded,
-                size: 64,
-                color: Colors.white38,
-              ),
+              if (editor.isLoadingMedia)
+                const CircularProgressIndicator(color: AppTheme.accent)
+              else if (editor.hasVideo && editor.previewController != null)
+                AspectRatio(
+                  aspectRatio: editor.previewController!.value.aspectRatio,
+                  child: VideoPlayer(editor.previewController!),
+                )
+              else
+                Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.videocam_off_rounded, size: 48, color: Colors.white.withOpacity(0.25)),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Нажми Media → Import Video',
+                      style: TextStyle(color: Colors.white.withOpacity(0.4), fontSize: 13),
+                    ),
+                  ],
+                ),
+              // Controls overlay
               Positioned(
-                bottom: 12,
-                left: 12,
-                right: 12,
-                child: Consumer<EditorService>(
-                  builder: (context, editor, _) {
-                    return Row(
-                      children: [
-                        IconButton(
-                          icon: Icon(
-                            editor.isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                            color: Colors.white,
-                          ),
-                          onPressed: editor.togglePlay,
+                bottom: 8,
+                left: 8,
+                right: 8,
+                child: Row(
+                  children: [
+                    IconButton(
+                      icon: Icon(
+                        editor.isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                        color: Colors.white,
+                      ),
+                      onPressed: editor.hasVideo ? editor.togglePlay : null,
+                    ),
+                    Expanded(
+                      child: SliderTheme(
+                        data: SliderTheme.of(context).copyWith(
+                          trackHeight: 2.5,
+                          thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
                         ),
-                        Expanded(
-                          child: SliderTheme(
-                            data: SliderTheme.of(context).copyWith(
-                              trackHeight: 2.5,
-                              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
-                            ),
-                            child: Slider(
-                              value: editor.playhead.clamp(0, editor.totalDuration),
-                              max: editor.totalDuration,
-                              onChanged: editor.setPlayhead,
-                              activeColor: AppTheme.accent,
-                              inactiveColor: Colors.white24,
-                            ),
-                          ),
+                        child: Slider(
+                          value: editor.playhead.clamp(0, editor.totalDuration),
+                          max: editor.totalDuration <= 0 ? 1 : editor.totalDuration,
+                          onChanged: editor.setPlayhead,
+                          activeColor: AppTheme.accent,
+                          inactiveColor: Colors.white24,
                         ),
-                        Text(
-                          _fmt(editor.playhead),
-                          style: const TextStyle(color: Colors.white70, fontSize: 12),
-                        ),
-                      ],
-                    );
-                  },
+                      ),
+                    ),
+                    Text(
+                      _fmt(editor.playhead),
+                      style: const TextStyle(color: Colors.white70, fontSize: 11),
+                    ),
+                  ],
                 ),
               ),
             ],
@@ -196,148 +283,84 @@ class _PreviewArea extends StatelessWidget {
     );
   }
 
-  String _fmt(double sec) {
-    final m = (sec / 60).floor();
-    final s = (sec % 60).floor();
-    return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
-  }
-}
-
-class _TimelineArea extends StatelessWidget {
-  @override
-  Widget build(BuildContext context) {
-    return Consumer<EditorService>(
-      builder: (context, editor, _) {
-        return Container(
-          margin: const EdgeInsets.symmetric(horizontal: 8),
-          child: Column(
+  Widget _buildTimeline(EditorService editor) {
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+          child: Row(
             children: [
-              // Timeline header
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                child: Row(
-                  children: [
-                    const Text(
-                      'Timeline',
-                      style: TextStyle(
-                        color: AppTheme.textSecondary,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                    const Spacer(),
-                    IconButton(
-                      icon: const Icon(Icons.zoom_out_rounded, size: 20),
-                      color: AppTheme.textSecondary,
-                      onPressed: () => editor.setTimelineScale(editor.timelineScale - 0.2),
-                      visualDensity: VisualDensity.compact,
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.zoom_in_rounded, size: 20),
-                      color: AppTheme.textSecondary,
-                      onPressed: () => editor.setTimelineScale(editor.timelineScale + 0.2),
-                      visualDensity: VisualDensity.compact,
-                    ),
-                  ],
-                ),
+              const Text('Timeline', style: TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
+              const Spacer(),
+              IconButton(
+                icon: const Icon(Icons.zoom_out, size: 18),
+                color: AppTheme.textSecondary,
+                onPressed: () => editor.setTimelineScale(editor.timelineScale - 0.2),
+                visualDensity: VisualDensity.compact,
               ),
-              // Tracks
-              Expanded(
-                child: ListView(
-                  children: [
-                    _Track(
-                      label: 'V1',
-                      clips: editor.clips.where((c) => c.type == 'video').toList(),
-                      color: const Color(0xFF4A7C9B),
-                    ),
-                    _Track(
-                      label: 'A1',
-                      clips: editor.clips.where((c) => c.type == 'audio').toList(),
-                      color: const Color(0xFF5C9B7A),
-                    ),
-                    _Track(
-                      label: 'T1',
-                      clips: editor.clips.where((c) => c.type == 'text').toList(),
-                      color: const Color(0xFF8B7C9B),
-                    ),
-                  ],
-                ),
+              IconButton(
+                icon: const Icon(Icons.zoom_in, size: 18),
+                color: AppTheme.textSecondary,
+                onPressed: () => editor.setTimelineScale(editor.timelineScale + 0.2),
+                visualDensity: VisualDensity.compact,
               ),
             ],
           ),
-        );
-      },
+        ),
+        Expanded(
+          child: ListView(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            children: [
+              _track('V1', editor.videoClips, const Color(0xFF4A7C9B), editor),
+              _track('A1', editor.audioClips, const Color(0xFF5C9B7A), editor),
+              _track('T1', editor.textClips, const Color(0xFF8B7C9B), editor),
+            ],
+          ),
+        ),
+      ],
     );
   }
-}
 
-class _Track extends StatelessWidget {
-  final String label;
-  final List<TimelineClip> clips;
-  final Color color;
-
-  const _Track({
-    required this.label,
-    required this.clips,
-    required this.color,
-  });
-
-  @override
-  Widget build(BuildContext context) {
+  Widget _track(String label, List<TimelineClip> clips, Color color, EditorService editor) {
+    final scale = 20.0 * editor.timelineScale;
     return Padding(
-      padding: const EdgeInsets.only(bottom: 6),
+      padding: const EdgeInsets.only(bottom: 5),
       child: Row(
         children: [
           SizedBox(
-            width: 36,
-            child: Text(
-              label,
-              style: const TextStyle(
-                color: AppTheme.textSecondary,
-                fontSize: 11,
-                fontWeight: FontWeight.w600,
-              ),
-              textAlign: TextAlign.center,
-            ),
+            width: 28,
+            child: Text(label, style: const TextStyle(color: AppTheme.textSecondary, fontSize: 10, fontWeight: FontWeight.w600), textAlign: TextAlign.center),
           ),
           Expanded(
             child: Container(
-              height: 42,
+              height: 38,
               decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(8),
-                color: AppTheme.surface.withOpacity(0.6),
+                borderRadius: BorderRadius.circular(6),
+                color: AppTheme.surface.withOpacity(0.5),
               ),
               child: Stack(
                 children: clips.map((clip) {
-                  final left = clip.start * 18.0; // simple scale
-                  final width = clip.duration * 18.0;
+                  final left = clip.start * scale;
+                  final width = (clip.duration * scale).clamp(28.0, 800.0);
+                  final selected = editor.selectedClipId == clip.id;
                   return Positioned(
                     left: left,
-                    top: 4,
-                    bottom: 4,
+                    top: 3,
+                    bottom: 3,
                     child: GestureDetector(
-                      onTap: () => context.read<EditorService>().selectClip(clip.id),
+                      onTap: () => editor.selectClip(clip.id),
                       child: Container(
-                        width: width.clamp(30, 400),
+                        width: width,
                         decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(6),
-                          color: color.withOpacity(0.75),
-                          border: Border.all(
-                            color: context.watch<EditorService>().selectedClipId == clip.id
-                                ? Colors.white
-                                : Colors.transparent,
-                            width: 1.5,
-                          ),
+                          borderRadius: BorderRadius.circular(5),
+                          color: color.withOpacity(0.8),
+                          border: Border.all(color: selected ? Colors.white : Colors.transparent, width: 1.5),
                         ),
+                        padding: const EdgeInsets.symmetric(horizontal: 5),
                         alignment: Alignment.centerLeft,
-                        padding: const EdgeInsets.symmetric(horizontal: 6),
                         child: Text(
                           clip.name,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 11,
-                            fontWeight: FontWeight.w500,
-                          ),
+                          style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w500),
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
@@ -351,77 +374,79 @@ class _Track extends StatelessWidget {
       ),
     );
   }
-}
 
-class _ToolsBar extends StatelessWidget {
-  @override
-  Widget build(BuildContext context) {
-    final tools = [
-      (ToolTab.media, Icons.video_library_rounded, 'Media'),
-      (ToolTab.audio, Icons.audiotrack_rounded, 'Audio'),
-      (ToolTab.text, Icons.text_fields_rounded, 'Text'),
-      (ToolTab.stickers, Icons.emoji_emotions_rounded, 'Stickers'),
-      (ToolTab.effects, Icons.auto_awesome_rounded, 'Effects'),
-      (ToolTab.filters, Icons.photo_filter_rounded, 'Filters'),
-      (ToolTab.transition, Icons.animation_rounded, 'Transition'),
-      (ToolTab.adjust, Icons.tune_rounded, 'Adjust'),
-      (ToolTab.speed, Icons.speed_rounded, 'Speed'),
-      (ToolTab.animation, Icons.movie_filter_rounded, 'Anim'),
-      (ToolTab.canvas, Icons.crop_rounded, 'Canvas'),
-      (ToolTab.export, Icons.ios_share_rounded, 'Export'),
+  Widget _buildTools(EditorService editor) {
+    final tools = <(ToolTab, IconData, String, VoidCallback?)>[
+      (ToolTab.media, Icons.video_library_rounded, 'Media', _importVideo),
+      (ToolTab.audio, Icons.audiotrack_rounded, 'Audio', _importAudio),
+      (ToolTab.text, Icons.text_fields_rounded, 'Text', _addText),
+      (ToolTab.stickers, Icons.emoji_emotions_rounded, 'Stickers', () {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Stickers — скоро')));
+      }),
+      (ToolTab.effects, Icons.auto_awesome_rounded, 'Effects', () {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Effects — скоро')));
+      }),
+      (ToolTab.filters, Icons.photo_filter_rounded, 'Filters', () {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Filters — скоро')));
+      }),
+      (ToolTab.transition, Icons.animation_rounded, 'Transition', null),
+      (ToolTab.adjust, Icons.tune_rounded, 'Adjust', null),
+      (ToolTab.speed, Icons.speed_rounded, 'Speed', null),
+      (ToolTab.animation, Icons.movie_filter_rounded, 'Anim', null),
+      (ToolTab.canvas, Icons.crop_rounded, 'Canvas', null),
+      (ToolTab.export, Icons.ios_share_rounded, 'Export', () => editor.exportProject()),
     ];
 
-    return Consumer<EditorService>(
-      builder: (context, editor, _) {
-        return Container(
-          height: 78,
-          decoration: BoxDecoration(
-            color: AppTheme.surface.withOpacity(0.95),
-            border: Border(
-              top: BorderSide(color: Colors.white.withOpacity(0.08)),
-            ),
-          ),
-          child: ListView.builder(
-            scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-            itemCount: tools.length,
-            itemBuilder: (context, index) {
-              final t = tools[index];
-              final selected = editor.currentTab == t.$1;
-              return GestureDetector(
-                onTap: () => editor.setTab(t.$1),
-                child: Container(
-                  width: 64,
-                  margin: const EdgeInsets.symmetric(horizontal: 2),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(12),
-                    color: selected ? AppTheme.accent.withOpacity(0.2) : Colors.transparent,
-                  ),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(
-                        t.$2,
-                        size: 22,
-                        color: selected ? AppTheme.accent : AppTheme.textSecondary,
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        t.$3,
-                        style: TextStyle(
-                          fontSize: 10,
-                          color: selected ? AppTheme.accent : AppTheme.textSecondary,
-                          fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              );
+    return Container(
+      height: 74,
+      decoration: BoxDecoration(
+        color: AppTheme.surface.withOpacity(0.95),
+        border: Border(top: BorderSide(color: Colors.white.withOpacity(0.07))),
+      ),
+      child: ListView.builder(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+        itemCount: tools.length,
+        itemBuilder: (context, index) {
+          final t = tools[index];
+          final selected = editor.currentTab == t.$1;
+          return GestureDetector(
+            onTap: () {
+              editor.setTab(t.$1);
+              t.$4?.call();
             },
-          ),
-        );
-      },
+            child: Container(
+              width: 60,
+              margin: const EdgeInsets.symmetric(horizontal: 2),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(10),
+                color: selected ? AppTheme.accent.withOpacity(0.2) : Colors.transparent,
+              ),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(t.$2, size: 20, color: selected ? AppTheme.accent : AppTheme.textSecondary),
+                  const SizedBox(height: 3),
+                  Text(
+                    t.$3,
+                    style: TextStyle(
+                      fontSize: 9,
+                      color: selected ? AppTheme.accent : AppTheme.textSecondary,
+                      fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
     );
+  }
+
+  String _fmt(double sec) {
+    final m = (sec / 60).floor();
+    final s = (sec % 60).floor();
+    return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
   }
 }

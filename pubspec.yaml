@@ -1,5 +1,5 @@
 name: crypton
-description: CryptoN — Advanced video editor with liquid glass UI. CapCut-level power, cinematic effects, 200+ features architecture.
+description: CryptoN Video Editor
 publish_to: 'none'
 version: 1.0.0+1
 
@@ -10,39 +10,18 @@ dependencies:
   flutter:
     sdk: flutter
   cupertino_icons: ^1.0.8
-
-  # Video & Media
   video_player: ^2.9.2
-  chewie: ^1.8.5
-  ffmpeg_kit_flutter_min_gpl: ^6.0.3
   path_provider: ^2.1.4
   file_picker: ^8.1.2
   image_picker: ^1.1.2
-  photo_manager: ^3.5.0
-  image: ^4.2.0
-  camera: ^0.11.0+2
-
-  # State
   provider: ^6.1.2
-  flutter_riverpod: ^2.5.1
-
-  # UI & Liquid Glass
   flutter_animate: ^4.5.0
-  animations: ^2.0.11
-  glassmorphism: ^3.0.0
-  shimmer: ^3.0.0
-  lottie: ^3.1.2
-  blur: ^4.0.0
-
-  # Utils
   uuid: ^4.5.1
   shared_preferences: ^2.3.2
   permission_handler: ^11.3.1
   path: ^1.9.0
   intl: ^0.19.0
   collection: ^1.18.0
-  http: ^1.2.2
-  cached_network_image: ^3.4.1
 
 dev_dependencies:
   flutter_test:
@@ -53,16 +32,3 @@ flutter:
   uses-material-design: true
   assets:
     - assets/images/
-    - assets/shaders/
-    - assets/fonts/
-    - assets/lottie/
-  fonts:
-    - family: CryptoN
-      fonts:
-        - asset: assets/fonts/Inter-Regular.ttf
-        - asset: assets/fonts/Inter-Medium.ttf
-          weight: 500
-        - asset: assets/fonts/Inter-SemiBold.ttf
-          weight: 600
-        - asset: assets/fonts/Inter-Bold.ttf
-          weight: 700
